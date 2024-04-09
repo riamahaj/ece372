@@ -1,0 +1,174 @@
+@Code to turn on and off LEDs in a sequence, with 1 second delay between each LED switching.
+@Program uses GPIO 21-24 LEDS in GPIO1 Mode. The logic to set outputs was calculated and the
+@values to set and clear the registers were also found. More details at the end of the program.
+@Program sets output values, then uses an array to set and clear the values for each LED.
+@Branches and comparisons are used to pause the sequence of the LEDs then start the sequence where it was paused on
+@the next button push.
+@Ria Mahajan November 29. 2023
+
+.text
+.global _start1
+.global INT_DIRECTOR
+_start1:
+		
+		LDR R13,= STACK1		@POINT TO BASE OF STACK FOR SVC MODE
+		ADD R13, R13, #0x1000	@POINT TO TOP OF STACK
+		CPS #0x12				@SWITCH TO IRQ MODE
+		LDR R13,=STACK2			@POINT TO IRQ STACK
+		ADD R13, R13, #0x1000	@POINT TO TOP OF STACK
+		CPS #0x13				@BACK TO SVC MODE
+
+@INITIALIZE/TURN ON GPIO1
+		MOV R0,#0x02
+		LDR R1,=0x44E000AC		@BASE ADDRESS OF GPIO1
+     	STR R0,[R1]				@TURN ON MODE1 (GPIO1)
+     	LDR R0,=0x4804C000		@BASE ADDRESS OF GPIO1
+     	ADD R4,R0,#0x190		@CLR_DATA REG LOAD VALUE
+     	
+     	
+    	MOV R7, #0x00200000		@GPIO_22 TO HIGH WHEN OUPUT		(OUT 22 = 0100 = 4)
+     	STR R7,[R4]				@WRITE TO GPIO_OE
+     	
+     	@GPIO AS OUPUT
+        ADD R1,R0,#0x0134       @ADDRESS OF GPIO1_OE
+        LDR R6,[R1]				@READ GPIO_OE
+        LDR R7,=0xFE1FFFFF		@SET 21-24 TO OUTPUTS
+        AND R6,R7,R6			@CLEAR BIT
+        STR R6,[R1]				@WRITE TO GPIO_OE REG
+        
+        @FALLING EDGE
+        ADD R1,R0, #0x14C		@FALLING EDGE DETECT
+        MOV R2, #0x40000000		@LOAD VALUE FOR BIT 30 (BUTTON = GPIO1_30)
+        LDR R3,[R1]				@READ FALLING DETECT REG
+        ORR R3, R3, R2			@MODIFY
+        STR R3,[R1]				@WRITE BACK
+        ADD R1, R0, #0x34		@ADDRESS OF GPIO_IRQSTATUS_SET_0 REG
+        STR R2,[R1]				@ENABLE GPIO1_30
+        
+        @INITIALIZE INTC
+        LDR R1,=0x482000E8		
+        MOV R2, #0x04			@UNMASK INTC INT 98, GPIOINT1A (PG280/282)
+        STR R2,[R1]
+       @POOL
+       MRS R3, CPSR
+       BIC R3, #0x80
+       MSR CPSR_c, R3
+
+       LOOP: NOP
+     		 B LOOP       
+ INT_DIRECTOR:
+ 			STMFD SP!,{R0-R5,LR}		@PUSH REGISTERS ON STACK
+ 			
+ 			LDR R0,=0x482000F8			@INT_PENDING_IRQ3 REG
+ 			LDR R1,[R0]					@INTC REG READ	
+ 			TST R1, #0x00000004			@TEST BIT 2
+ 			BEQ PASS_ON					@NOT FROM GPIOINTA, GO TO WAIT LOOP
+ 			LDR R0,=0x4804C02C			@LOAD GPIO1_IRQSTATUS_0 REG ADDRESS
+ 			LDR R1, [R0]				@READ STATUS REG
+ TEST:		TST R1,#0x40000000			@CHECK IF BIT 30=1
+ 			BNE LED_CHECK					@IF YES, BUTTON PUSHED, GO TO BUTTON PROCEDURE
+ 			BEQ PASS_ON					@ELSE GO TO WAIT LOOP
+LED_CHECK:	LDR R1,= 0x4804C000			@LOAD BASE ADDRESS OF GPIO1
+		LDR R2,[R1,#0x013C]				@LOAD DATAOUT GPIO ADDRESS
+		CMP R2, #0x00000000				@CHECK IF LED = 0
+		BNE TEST3					@IF NO, GO TO TEST3
+		B BUTTON
+		
+ 			
+ PASS_ON: 
+       	  LDMFD SP!, {R0-R5,LR}
+ 		  SUBS PC,LR,#4
+ 		  
+TEST3:
+		MOV R1, #0x40000000				@VALUE TO TURN OFF GPIO1_30 REQ
+			STR R1,[R0]					@WRITE TO GPIO1_IRQSTATUS_0
+			
+			@TURN OFF NEWIRQA BIT IN INTC_CONTROL
+			LDR R0,=0x48200048			@ADDRESS OF INTC_CONTROL REG
+			MOV R1, #01					@VALUE TO CLEAR BIT 0
+			STR R1,[R0]					@WRITE TO INTC_CONTROL REG
+LOOP2:			LDR R0,=0x4804C02C			@LOAD GPIO1_IRQSTATUS_0 REG ADDRESS
+ 			LDR R1, [R0]				@READ STATUS REG
+			TST R1,#0x40000000			@CHECK IF BIT 30=1
+			BLNE BUTTON 				@IF YES, BUTTON PUSHED, GO TO BUTTON PROCEDURE
+ 	  		BEQ LOOP2					@ELSE, GO TO LOOP2
+ 	  		 
+ 	  		
+BUTTON:
+		MOV R1, #0x40000000				@VALUE TO TURN OFF GPIO1_30 REQ
+			STR R1,[R0]					@WRITE TO GPIO1_IRQSTATUS_0
+			
+			@TURN OFF NEWIRQA BIT IN INTC_CONTROL
+			LDR R0,=0x48200048			@ADDRESS OF INTC_CONTROL REG
+			MOV R1, #01					@VALUE TO CLEAR BIT 0
+			STR R1,[R0]					@WRITE TO INTC_CONTROL REG
+			
+			@MAKE SURE PROCESSOR IRQ ENABLED IN CPSR
+			MRS R3, CPSR				@COPY CPSR TO R3
+			BIC R3, #0x80				@CLEAR BIT 7
+			MSR CPSR_c, R3				@WRITE BACK TO CPSR
+			@TURN ON LED
+SET:  	LDMFD SP!, {R0-R5,LR}	@RESTORE REGISTERS AND LR
+		LDR R1,= 0x4804C000			@LOAD BASE ADDRESS OF GPIO1
+		LDR R2,[R1,#0x013C]				@LOAD DATAOUT GPIO ADDRESS
+		CMP R2, #0x00000000				@CHECK IF LED = 0
+		BNE START
+		LDR R3,=ADDRESSES		@RESET/SET VALUE TO TURN ON LED0															
+       @TURN ON LED
+ START:LDR R0,=0x4804C194		@LOAD ADDRESS OF GPIO_SETDATAOUT
+       LDR R4, [R3]				@LOAD VALUE TO TURN ON LED                               
+       STR R4,[R0]				@WRITE TO SETDATAOUT REG
+       MOV R2, #0x0400000			@SET TIMER
+       LOOP1:
+       		NOP
+       		SUBS R2,#1			@LOOP TO WAIT 1 SEC
+       		BNE LOOP1
+  
+       @TURN OFF
+       LDR R0,=0x4804C190		@LOAD ADDRESS OF GPIO1_CLEARDATAOUT REG
+       STR R4,[R0]				@WRITE VALUE TO TURN OFF LED
+       ADD R3, R3, #4
+       CMP R4, #0x00C00000		@COMPARE VALUE TO BE LOADED (CHECK IF AT END OF SEQUENCE)
+       BNE START				@IF LESS THAN THE HEX NUM, GO TO START
+       B SET					@ELSE GO TO LED0
+ 		 	
+ 		 	
+       			       	
+.data
+.align 2
+ADDRESSES: .word 0x00600000, 0x01800000, 0x00C00000			
+ .align 2
+ SYS_IRQ:   .WORD 0
+ .data
+ .align 2
+ STACK1:	.rept 1024
+ 			.word 0x0000
+ 			.endr
+ STACK2:	.rept 1024
+ 			.word 0x0000
+ 			.endr
+.end 
+       
+ 
+       
+       
+      @GPIO OUTPUTS TO SET AND VALUES TO TURN ON/OFF FOR EACH GPIO PIN (21-24)
+      @21
+      @ MOV R5,#0x00200000		@GPIO_22 TO HIGH WHEN OUPUT		(OUT 22 = 0100 = 4)
+      @LDR R0,=0xFFDFFFFF		@SET GPIO22 AS OUTPUT
+      
+      @22
+       @ MOV R5,#0x00400000		@GPIO_22 TO HIGH WHEN OUPUT		(OUT 22 = 0100 = 4)
+       @LDR R0,=0xFFBFFFFF		@SET GPIO22 AS OUTPUT
+       
+       @23
+       @ MOV R5,#0x00800000		@GPIO_22 TO HIGH WHEN OUPUT		(OUT 22 = 0100 = 4)
+       @LDR R0,=0xFF7FFFFF		@SET GPIO22 AS OUTPUT
+       
+        @24
+       @ MOV R5,#0x01000000		@GPIO_22 TO HIGH WHEN OUPUT		(OUT 22 = 0100 = 4)
+       @LDR R0,=0xFEFFFFFF		@SET GPIO22 AS OUTPUT
+        
+ 
+		
+.end
